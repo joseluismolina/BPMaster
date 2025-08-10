@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
+r"""
 BPM Master - Cross-Platform Audio Tempo Adjustment Script
 ==========================================================
 
@@ -30,7 +30,7 @@ This project uses a virtual environment to manage dependencies.
     ```bash
     pip install -r requirements.txt
     ```
-    This will install `essentia`, `tqdm`, `numpy`, and `pyrubberband`.
+    This will install `essentia`, `tqdm`, and `pyrubberband`.
 
 **Usage:**
 
@@ -47,8 +47,13 @@ from pathlib import Path
 
 try:
     from tqdm import tqdm
+    import essentia
     import essentia.standard as es
     import pyrubberband as pyrb
+
+    # Deactivate Essentia's INFO logs to avoid spamming the console
+    essentia.log.info_active = False
+
 except ImportError as e:
     print(f"Error: A required library is not installed. {e}", file=sys.stderr)
     print("Please install dependencies by running: pip install -r requirements.txt", file=sys.stderr)
