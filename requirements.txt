@@ -1,0 +1,3 @@
+essentia
+tqdm
+numpy
