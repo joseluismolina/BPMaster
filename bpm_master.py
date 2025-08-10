@@ -30,7 +30,7 @@ This project uses a virtual environment to manage dependencies.
     ```bash
     pip install -r requirements.txt
     ```
-    This will install `essentia`, `tqdm`, and `pyrubberband`.
+    This will install `essentia`, `pyrubberband`, and `rich`.
 
 **Usage:**
 
@@ -46,10 +46,11 @@ import logging
 from pathlib import Path
 
 try:
-    from tqdm import tqdm
     import essentia
     import essentia.standard as es
     import pyrubberband as pyrb
+    from rich.console import Console
+    from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
 
     # Deactivate Essentia's INFO logs to avoid spamming the console
     essentia.log.info_active = False
@@ -63,6 +64,9 @@ except ImportError as e:
 # --- Constants ---
 SUPPORTED_EXTENSIONS = ['.mp3', '.wav', '.flac']
 LOG_FILE = 'errors.log'
+
+# --- Rich Console ---
+console = Console()
 
 # --- Logger Configuration ---
 logging.basicConfig(
@@ -94,35 +98,19 @@ def detect_bpm(file_path: str) -> tuple[float | None, float | None]:
 def stretch_audio(input_file: str, output_file: str, factor: float):
     """
     Stretches audio tempo using pyrubberband and Essentia for I/O.
-
-    Args:
-        input_file: Path to the source audio file.
-        output_file: Path to save the modified audio file.
-        factor: The tempo stretch factor (e.g., 1.1 for +10%).
-    
-    Raises:
-        Exception: If audio loading, processing, or writing fails.
     """
-    # Use Essentia to load audio to a numpy array and get sample rate
     audio, sr_float, _, _, _, _ = es.AudioLoader(filename=input_file)()
-    
-    # The sample rate must be an integer for pyrubberband and AudioWriter
     sr = int(sr_float)
-    
-    # Use pyrubberband to time-stretch the audio data
-    # Note: pyrubberband expects mono or stereo, Essentia's AudioLoader provides stereo if available
     stretched_audio = pyrb.time_stretch(audio, sr, factor)
-    
-    # Use Essentia to write the stretched numpy array back to a file
     output_format = Path(output_file).suffix[1:].lower()
     es.AudioWriter(filename=output_file, format=output_format, sampleRate=sr)(stretched_audio)
 
 
 def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: bool):
     """
-    Main function to process a folder of audio files.
+    Main function to process a folder of audio files with a Rich progress bar.
     """
-    print(f"Searching for audio files in: {folder}")
+    console.print(f"Searching for audio files in: [cyan]{folder}[/cyan]")
     
     input_path = Path(folder).expanduser()
     output_path = Path(out_dir).expanduser()
@@ -133,10 +121,10 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
     ]
 
     if not audio_files:
-        print("No audio files found. Exiting.")
+        console.print("[yellow]No audio files found. Exiting.[/yellow]")
         return
 
-    print(f"Found {len(audio_files)} audio files. Processing...")
+    console.print(f"Found {len(audio_files)} audio files. Processing...")
     
     if not analyze_only:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -145,54 +133,60 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
     modified_count = 0
     failed_count = 0
 
-    progress_bar = tqdm(audio_files, desc="Processing files", unit="file")
+    progress_columns = (
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        MofNCompleteColumn(),
+        TextColumn("eta"),
+        TimeRemainingColumn(),
+    )
 
-    for file_path in progress_bar:
-        processed_count += 1
-        progress_bar.set_postfix_str(Path(file_path).name)
+    with Progress(*progress_columns, console=console) as progress:
+        task = progress.add_task("[green]Processing...", total=len(audio_files))
 
-        detected_bpm, confidence = detect_bpm(file_path)
+        for file_path in audio_files:
+            progress.update(task, description=f"[green]Processing [bold]{Path(file_path).name}[/bold]")
 
-        if detected_bpm is None:
-            print(f"-> Failed to detect BPM for: {Path(file_path).name}")
-            failed_count += 1
-            continue
+            detected_bpm, confidence = detect_bpm(file_path)
 
-        if analyze_only:
-            print(f"  - File: {Path(file_path).name} | Detected BPM: {detected_bpm:.2f} (Confidence: {confidence:.2f})")
-            continue
-
-        if detected_bpm > 0:
-            factor = target_bpm / detected_bpm
-            
-            relative_path = Path(file_path).relative_to(input_path)
-            output_file_path = output_path / relative_path
-            output_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-            try:
-                stretch_audio(file_path, str(output_file_path), factor)
-                modified_count += 1
-            except Exception as e:
-                logging.error(f"Failed to stretch audio for {file_path}: {e}")
-                print(f"-> Failed to stretch audio for: {Path(file_path).name} (see {LOG_FILE})")
+            if detected_bpm is None:
+                console.print(f"[red] -> FAIL [/red] Could not detect BPM for: {Path(file_path).name}")
                 failed_count += 1
-        else:
-            failed_count += 1
-            logging.error(f"Cannot process {file_path} due to invalid detected BPM (0).")
-            print(f"-> Failed to process: {Path(file_path).name} (BPM was 0)")
+            elif analyze_only:
+                console.print(f"[blue] -> INFO [/blue] {Path(file_path).name} | BPM: {detected_bpm:.2f} (Confidence: {confidence:.2f})")
+            elif detected_bpm > 0:
+                factor = target_bpm / detected_bpm
+                relative_path = Path(file_path).relative_to(input_path)
+                output_file_path = output_path / relative_path
+                output_file_path.parent.mkdir(parents=True, exist_ok=True)
 
+                try:
+                    stretch_audio(file_path, str(output_file_path), factor)
+                    modified_count += 1
+                    console.print(f"[green] -> OK   [/green] Processed {Path(file_path).name}")
+                except Exception as e:
+                    logging.error(f"Failed to stretch audio for {file_path}: {e}")
+                    console.print(f"[red] -> FAIL [/red] Could not process {Path(file_path).name} (see {LOG_FILE})")
+                    failed_count += 1
+            else:
+                failed_count += 1
+                logging.error(f"Cannot process {file_path} due to invalid detected BPM (0).")
+                console.print(f"[red] -> FAIL [/red] Invalid BPM (0) for {Path(file_path).name}")
+            
+            processed_count += 1
+            progress.update(task, advance=1)
 
     # --- Final Summary ---
-    print("\n" + "="*30)
-    print("Processing Complete")
-    print("="*30)
-    print(f"Total files processed: {processed_count}")
+    console.print("\n" + "="*30)
+    console.print("[bold green]Processing Complete[/bold green]")
+    console.print("="*30)
+    console.print(f"Total files processed: {processed_count}")
     if not analyze_only:
-        print(f"Files modified:        {modified_count}")
-    print(f"Files failed:          {failed_count}")
+        console.print(f"Files modified:        {modified_count}")
+    console.print(f"Files failed:          [red]{failed_count}[/red]")
     if failed_count > 0:
-        print(f"See '{LOG_FILE}' for details on errors.")
-    print("="*30)
+        console.print(f"See '{LOG_FILE}' for details on errors.")
+    console.print("="*30)
 
 
 def main():
@@ -230,11 +224,11 @@ def main():
 
     input_folder_path = Path(args.input_folder).expanduser()
     if not input_folder_path.is_dir():
-        print(f"Error: Input folder not found at '{input_folder_path}'", file=sys.stderr)
+        console.print(f"[bold red]Error: Input folder not found at '{input_folder_path}'[/bold red]")
         sys.exit(1)
     
     if args.target_bpm <= 0:
-        print(f"Error: Target BPM must be a positive number.", file=sys.stderr)
+        console.print("[bold red]Error: Target BPM must be a positive number.[/bold red]")
         sys.exit(1)
 
     process_folder(

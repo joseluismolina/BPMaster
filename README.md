@@ -52,7 +52,7 @@ With the virtual environment active, install all required Python libraries from 
 ```bash
 pip install -r requirements.txt
 ```
-This will install `essentia`, `tqdm`, and `pyrubberband`.
+This will install `essentia`, `rich`, and `pyrubberband`.
 
 ## Usage
 
