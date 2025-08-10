@@ -2,61 +2,53 @@
 # -*- coding: utf-8 -*-
 
 """
-BPM Master - Audio Tempo Adjustment Script
-==========================================
+BPM Master - Cross-Platform Audio Tempo Adjustment Script
+==========================================================
 
 This script recursively finds audio files in a given directory, detects their
-BPM (Beats Per Minute), and adjusts their tempo to a target BPM using an
-external tool.
+BPM (Beats Per Minute), and adjusts their tempo to a target BPM.
+
+It is fully cross-platform (Windows, macOS, Linux) and handles all processing
+using Python libraries.
 
 **Installation:**
 
-1.  **Python Dependencies:**
-    Install the required Python libraries using pip. It is recommended to do
-    this within a virtual environment.
+This project uses a virtual environment to manage dependencies.
 
+1.  **Create and activate a virtual environment:**
+    ```bash
+    # Create the environment
+    python3 -m venv venv
+
+    # Activate it (on Linux/macOS)
+    source venv/bin/activate
+    # On Windows (Command Prompt)
+    # .\venv\Scripts\activate.bat
+    ```
+
+2.  **Install all dependencies via pip:**
     ```bash
     pip install -r requirements.txt
     ```
-    (This will install `essentia` and `tqdm`)
-
-2.  **External Tool (rubberband-cli):**
-    This script relies on `rubberband-cli` for audio time-stretching.
-    You must install it using your system's package manager.
-
-    On Debian/Ubuntu:
-    ```bash
-    sudo apt update
-    sudo apt install rubberband-cli
-    ```
-
-    On other Linux distributions, use the appropriate package manager (e.g., `yum`, `pacman`).
+    This will install `essentia`, `tqdm`, `numpy`, and `pyrubberband`.
 
 **Usage:**
 
 ```bash
 python bpm_master.py /path/to/your/audio --target-bpm 120
 ```
-
-**Examples:**
-
-# Analyze all audio files in '~/Music/samples' without changing them:
-python bpm_master.py ~/Music/samples --target-bpm 120 --analyze-only
-
-# Change tempo of all audio in '~/Music/loops' to 90 BPM and save them in '~/Music/loops_processed':
-python bpm_master.py ~/Music/loops --target-bpm 90 --output-dir ~/Music/loops_processed
 """
 
 import os
 import sys
 import argparse
-import subprocess
 import logging
 from pathlib import Path
 
 try:
     from tqdm import tqdm
     import essentia.standard as es
+    import pyrubberband as pyrb
 except ImportError as e:
     print(f"Error: A required library is not installed. {e}", file=sys.stderr)
     print("Please install dependencies by running: pip install -r requirements.txt", file=sys.stderr)
@@ -78,18 +70,10 @@ logging.basicConfig(
 def detect_bpm(file_path: str) -> tuple[float | None, float | None]:
     """
     Detects the BPM and confidence of an audio file using Essentia.
-
-    Args:
-        file_path: Absolute path to the audio file.
-
-    Returns:
-        A tuple containing (bpm, confidence). Returns (None, None) on failure.
     """
     try:
         loader = es.MonoLoader(filename=file_path)
         audio = loader()
-        
-        # RhythmExtractor2013 with the 'multifeature' method
         rhythm_extractor = es.RhythmExtractor2013(method="multifeature")
         bpm, _, confidence, _, _ = rhythm_extractor(audio)
 
@@ -99,44 +83,42 @@ def detect_bpm(file_path: str) -> tuple[float | None, float | None]:
             
         return bpm, confidence
     except Exception as e:
-        logging.error(f"Essentia failed to process {file_path}: {e}")
+        logging.error(f"Essentia failed to detect BPM in {file_path}: {e}")
         return None, None
 
 def stretch_audio(input_file: str, output_file: str, factor: float):
     """
-    Stretches audio tempo using rubberband-cli.
+    Stretches audio tempo using pyrubberband and Essentia for I/O.
 
     Args:
         input_file: Path to the source audio file.
         output_file: Path to save the modified audio file.
         factor: The tempo stretch factor (e.g., 1.1 for +10%).
-
+    
     Raises:
-        subprocess.CalledProcessError: If rubberband-cli returns a non-zero exit code.
+        Exception: If audio loading, processing, or writing fails.
     """
-    command = [
-        'rubberband',
-        '--tempo', str(factor),
-        '--quiet', # Prevents rubberband from printing its own progress
-        input_file,
-        output_file
-    ]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    # Use Essentia to load audio to a numpy array and get sample rate
+    audio, sr_float, _, _, _, _ = es.AudioLoader(filename=input_file)()
+    
+    # The sample rate must be an integer for pyrubberband and AudioWriter
+    sr = int(sr_float)
+    
+    # Use pyrubberband to time-stretch the audio data
+    # Note: pyrubberband expects mono or stereo, Essentia's AudioLoader provides stereo if available
+    stretched_audio = pyrb.time_stretch(audio, sr, factor)
+    
+    # Use Essentia to write the stretched numpy array back to a file
+    output_format = Path(output_file).suffix[1:].lower()
+    es.AudioWriter(filename=output_file, format=output_format, sampleRate=sr)(stretched_audio)
 
 
 def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: bool):
     """
     Main function to process a folder of audio files.
-
-    Args:
-        folder: The root folder to search for audio files.
-        target_bpm: The desired target BPM.
-        out_dir: The directory to save modified files.
-        analyze_only: If True, only analyze and print BPMs.
     """
     print(f"Searching for audio files in: {folder}")
     
-    # Find all audio files recursively
     input_path = Path(folder).expanduser()
     output_path = Path(out_dir).expanduser()
     
@@ -151,22 +133,17 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
 
     print(f"Found {len(audio_files)} audio files. Processing...")
     
-    # Create output directory if it doesn't exist and we are modifying files
     if not analyze_only:
         output_path.mkdir(parents=True, exist_ok=True)
 
-    # Statistics counters
     processed_count = 0
     modified_count = 0
     failed_count = 0
 
-    # Progress bar
     progress_bar = tqdm(audio_files, desc="Processing files", unit="file")
 
     for file_path in progress_bar:
         processed_count += 1
-        
-        # Update progress bar description
         progress_bar.set_postfix_str(Path(file_path).name)
 
         detected_bpm, confidence = detect_bpm(file_path)
@@ -180,11 +157,9 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
             print(f"  - File: {Path(file_path).name} | Detected BPM: {detected_bpm:.2f} (Confidence: {confidence:.2f})")
             continue
 
-        # --- Tempo Modification Logic ---
         if detected_bpm > 0:
             factor = target_bpm / detected_bpm
             
-            # Create the same sub-directory structure in the output folder
             relative_path = Path(file_path).relative_to(input_path)
             output_file_path = output_path / relative_path
             output_file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,13 +167,9 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
             try:
                 stretch_audio(file_path, str(output_file_path), factor)
                 modified_count += 1
-            except subprocess.CalledProcessError as e:
-                logging.error(f"rubberband-cli failed for {file_path}: {e.stderr}")
-                print(f"-> Failed to stretch audio for: {Path(file_path).name} (see {LOG_FILE})")
-                failed_count += 1
             except Exception as e:
-                logging.error(f"An unexpected error occurred during stretching of {file_path}: {e}")
-                print(f"-> An unexpected error occurred for: {Path(file_path).name} (see {LOG_FILE})")
+                logging.error(f"Failed to stretch audio for {file_path}: {e}")
+                print(f"-> Failed to stretch audio for: {Path(file_path).name} (see {LOG_FILE})")
                 failed_count += 1
         else:
             failed_count += 1
@@ -207,7 +178,7 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
 
 
     # --- Final Summary ---
-    print("" + "="*30)
+    print("\n" + "="*30)
     print("Processing Complete")
     print("="*30)
     print(f"Total files processed: {processed_count}")
@@ -238,7 +209,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         default="./out",
-        help="The directory to save modified files.(default: ./out)"
+        help="The directory to save modified files.\n(default: ./out)"
     )
     parser.add_argument(
         "--analyze-only",
@@ -252,7 +223,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Basic validation
     input_folder_path = Path(args.input_folder).expanduser()
     if not input_folder_path.is_dir():
         print(f"Error: Input folder not found at '{input_folder_path}'", file=sys.stderr)
