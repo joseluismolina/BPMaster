@@ -44,6 +44,7 @@ import sys
 import argparse
 import logging
 from pathlib import Path
+import multiprocessing
 
 try:
     import essentia
@@ -106,6 +107,39 @@ def stretch_audio(input_file: str, output_file: str, factor: float):
     es.AudioWriter(filename=output_file, format=output_format, sampleRate=sr)(stretched_audio)
 
 
+def _process_single_file_task(args):
+    file_path, target_bpm, input_path_str, output_path_str, analyze_only, log_file_name = args
+    
+    input_path = Path(input_path_str)
+    output_path = Path(output_path_str)
+
+    try:
+        detected_bpm, confidence = detect_bpm(file_path)
+
+        if detected_bpm is None:
+            return (False, file_path, "BPM_DETECTION_FAILED")
+        elif analyze_only:
+            return (True, file_path, "ANALYZE_ONLY", detected_bpm, confidence)
+        elif detected_bpm > 0:
+            factor = target_bpm / detected_bpm
+            relative_path = Path(file_path).relative_to(input_path)
+            output_file_path = output_path / relative_path
+            output_file_path.parent.mkdir(parents=True, exist_ok=True)
+
+            try:
+                stretch_audio(file_path, str(output_file_path), factor)
+                return (True, file_path, "PROCESSED")
+            except Exception as e:
+                logging.error(f"Failed to stretch audio for {file_path}: {e}")
+                return (False, file_path, "STRETCH_FAILED")
+        else:
+            logging.error(f"Cannot process {file_path} due to invalid detected BPM (0).")
+            return (False, file_path, "INVALID_BPM")
+
+    except Exception as e:
+        logging.error(f"Unhandled error processing {file_path}: {e}")
+        return (False, file_path, "UNHANDLED_ERROR")
+
 def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: bool):
     """
     Main function to process a folder of audio files with a Rich progress bar.
@@ -141,40 +175,43 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
         TimeRemainingColumn(),
     )
 
+    num_cores = multiprocessing.cpu_count()
+    console.print(f"Using {num_cores} CPU cores for parallel processing.")
+
     with Progress(*progress_columns, console=console) as progress:
         task = progress.add_task("[green]Processing...", total=len(audio_files))
 
-        for file_path in audio_files:
-            progress.update(task, description=f"[green]Processing [bold]{Path(file_path).name}[/bold]")
+        # Prepare arguments for each task
+        tasks_args = [
+            (file_path, target_bpm, str(input_path), str(output_path), analyze_only, LOG_FILE)
+            for file_path in audio_files
+        ]
 
-            detected_bpm, confidence = detect_bpm(file_path)
+        with multiprocessing.Pool(processes=num_cores) as pool:
+            for result in pool.imap_unordered(_process_single_file_task, tasks_args):
+                is_success, file_path, status_code, *extra_data = result
+                file_name = Path(file_path).name
 
-            if detected_bpm is None:
-                console.print(f"[red] -> FAIL [/red] Could not detect BPM for: {Path(file_path).name}")
-                failed_count += 1
-            elif analyze_only:
-                console.print(f"[blue] -> INFO [/blue] {Path(file_path).name} | BPM: {detected_bpm:.2f} (Confidence: {confidence:.2f})")
-            elif detected_bpm > 0:
-                factor = target_bpm / detected_bpm
-                relative_path = Path(file_path).relative_to(input_path)
-                output_file_path = output_path / relative_path
-                output_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-                try:
-                    stretch_audio(file_path, str(output_file_path), factor)
-                    modified_count += 1
-                    console.print(f"[green] -> OK   [/green] Processed {Path(file_path).name}")
-                except Exception as e:
-                    logging.error(f"Failed to stretch audio for {file_path}: {e}")
-                    console.print(f"[red] -> FAIL [/red] Could not process {Path(file_path).name} (see {LOG_FILE})")
+                if is_success:
+                    if status_code == "ANALYZE_ONLY":
+                        detected_bpm, confidence = extra_data
+                        console.print(f"[blue] -> INFO [/blue] {file_name} | BPM: {detected_bpm:.2f} (Confidence: {confidence:.2f})")
+                    elif status_code == "PROCESSED":
+                        modified_count += 1
+                        console.print(f"[green] -> OK   [/green] Processed {file_name}")
+                else:
                     failed_count += 1
-            else:
-                failed_count += 1
-                logging.error(f"Cannot process {file_path} due to invalid detected BPM (0).")
-                console.print(f"[red] -> FAIL [/red] Invalid BPM (0) for {Path(file_path).name}")
-            
-            processed_count += 1
-            progress.update(task, advance=1)
+                    if status_code == "BPM_DETECTION_FAILED":
+                        console.print(f"[red] -> FAIL [/red] Could not detect BPM for: {file_name}")
+                    elif status_code == "STRETCH_FAILED":
+                        console.print(f"[red] -> FAIL [/red] Could not process {file_name} (see {LOG_FILE})")
+                    elif status_code == "INVALID_BPM":
+                        console.print(f"[red] -> FAIL [/red] Invalid BPM (0) for {file_name}")
+                    elif status_code == "UNHANDLED_ERROR":
+                        console.print(f"[red] -> FAIL [/red] Unhandled error for {file_name} (see {LOG_FILE})")
+                
+                processed_count += 1
+                progress.update(task, advance=1, description=f"[green]Processing [bold]{file_name}[/bold]")
 
     # --- Final Summary ---
     console.print("\n" + "="*30)
