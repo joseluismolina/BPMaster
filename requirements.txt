@@ -1,3 +1,4 @@
 essentia
 pyrubberband
 rich
+pydub

@@ -30,7 +30,7 @@ This project uses a virtual environment to manage dependencies.
     ```bash
     pip install -r requirements.txt
     ```
-    This will install `essentia`, `pyrubberband`, and `rich`.
+    This will install `essentia`, `pyrubberband`, `pydub`, and `rich`.
 
 **Usage:**
 
@@ -52,6 +52,7 @@ try:
     import pyrubberband as pyrb
     from rich.console import Console
     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+    from pydub import AudioSegment
 
     # Deactivate Essentia's INFO logs to avoid spamming the console
     essentia.log.info_active = False
@@ -98,13 +99,34 @@ def detect_bpm(file_path: str) -> tuple[float | None, float | None]:
 
 def stretch_audio(input_file: str, output_file: str, factor: float):
     """
-    Stretches audio tempo using pyrubberband and Essentia for I/O.
+    Stretches audio tempo using pyrubberband and uses pydub for I/O.
     """
+    # Essentia is still used for loading the audio
     audio, sr_float, _, _, _, _ = es.AudioLoader(filename=input_file)()
     sr = int(sr_float)
+
+    # Pyrubberband for stretching
     stretched_audio = pyrb.time_stretch(audio, sr, factor)
+
+    # Convert numpy array to pydub AudioSegment
+    # The audio data needs to be in 16-bit integer format for pydub
+    if stretched_audio.ndim == 1:
+        channels = 1
+    else:
+        channels = stretched_audio.shape[1]
+
+    samples = (stretched_audio * 32767).astype("int16")
+    
+    audio_segment = AudioSegment(
+        samples.tobytes(),
+        frame_rate=sr,
+        sample_width=samples.dtype.itemsize,
+        channels=channels
+    )
+
+    # Export with pydub
     output_format = Path(output_file).suffix[1:].lower()
-    es.AudioWriter(filename=output_file, format=output_format, sampleRate=sr)(stretched_audio)
+    audio_segment.export(output_file, format=output_format)
 
 
 def _process_single_file_task(args):
