@@ -2,3 +2,4 @@ essentia
 pyrubberband
 rich
 pydub
+numpy

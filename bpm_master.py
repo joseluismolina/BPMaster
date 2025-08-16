@@ -39,7 +39,6 @@ python bpm_master.py /path/to/your/audio --target-bpm 120
 ```
 """
 
-import os
 import sys
 import argparse
 import logging
@@ -47,15 +46,11 @@ from pathlib import Path
 import multiprocessing
 
 try:
-    import essentia
     import essentia.standard as es
     import pyrubberband as pyrb
     from rich.console import Console
     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
     from pydub import AudioSegment
-
-    # Deactivate Essentia's INFO logs to avoid spamming the console
-    essentia.log.info_active = False
 
 except ImportError as e:
     print(f"Error: A required library is not installed. {e}", file=sys.stderr)
@@ -78,24 +73,33 @@ logging.basicConfig(
     filemode='w'
 )
 
-def detect_bpm(file_path: str) -> tuple[float | None, float | None]:
+def detect_bpm(file_path: str) -> float | None:
     """
-    Detects the BPM and confidence of an audio file using Essentia.
+    Detects the BPM using the PercivalBpmEstimator algorithm from Essentia,
+    applying post-processing heuristics for dance music.
     """
     try:
-        loader = es.MonoLoader(filename=file_path)
-        audio = loader()
-        rhythm_extractor = es.RhythmExtractor2013(method="multifeature")
-        bpm, _, confidence, _, _ = rhythm_extractor(audio)
+        # 1. Load the audio file in mono. PercivalBpmEstimator works on raw audio.
+        audio = es.MonoLoader(filename=file_path)()
 
-        if bpm is None or bpm == 0:
-            logging.error(f"BPM detection failed for {file_path}. Result was 0 or None.")
-            return None, None
-            
-        return bpm, confidence
+        # 2. Use the PercivalBpmEstimator algorithm.
+        # This is another robust estimator recommended in the Essentia documentation.
+        bpm = es.PercivalBpmEstimator()(audio)
+
+        # --- Post-processing Heuristics for Dance Music ---
+
+        # 3. Check for octave errors (e.g., 75 BPM instead of 150)
+        while bpm < 100:
+            bpm *= 2
+        
+        # 4. Round to the nearest whole number for a cleaner BPM value
+        bpm = round(bpm)
+        
+        return float(bpm)
+
     except Exception as e:
-        logging.error(f"Essentia failed to detect BPM in {file_path}: {e}")
-        return None, None
+        logging.error(f"Essentia (PercivalBpmEstimator) failed for {file_path}: {e}")
+        return None
 
 def stretch_audio(input_file: str, output_file: str, factor: float):
     """
@@ -136,12 +140,12 @@ def _process_single_file_task(args):
     output_path = Path(output_path_str)
 
     try:
-        detected_bpm, confidence = detect_bpm(file_path)
+        detected_bpm = detect_bpm(file_path)
 
         if detected_bpm is None:
             return (False, file_path, "BPM_DETECTION_FAILED")
         elif analyze_only:
-            return (True, file_path, "ANALYZE_ONLY", detected_bpm, confidence)
+            return (True, file_path, "ANALYZE_ONLY", detected_bpm)
         elif detected_bpm > 0:
             factor = target_bpm / detected_bpm
             relative_path = Path(file_path).relative_to(input_path)
@@ -216,8 +220,8 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
 
                 if is_success:
                     if status_code == "ANALYZE_ONLY":
-                        detected_bpm, confidence = extra_data
-                        console.print(f"[blue] -> INFO [/blue] {file_name} | BPM: {detected_bpm:.2f} (Confidence: {confidence:.2f})")
+                        detected_bpm = extra_data[0]
+                        console.print(f"[blue] -> INFO [/blue] {file_name} | BPM: {detected_bpm:.2f}")
                     elif status_code == "PROCESSED":
                         modified_count += 1
                         console.print(f"[green] -> OK   [/green] Processed {file_name}")
