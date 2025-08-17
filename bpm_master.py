@@ -59,7 +59,7 @@ import sys
 import argparse
 import logging
 from pathlib import Path
-import multiprocessing, os, threading, time
+import multiprocessing, threading, time
 from multiprocessing import Manager
 
 try:
