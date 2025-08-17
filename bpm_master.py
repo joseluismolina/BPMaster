@@ -43,7 +43,8 @@ import sys
 import argparse
 import logging
 from pathlib import Path
-import multiprocessing
+import multiprocessing, os, threading, time
+from multiprocessing import Manager
 
 try:
     import essentia
@@ -51,7 +52,11 @@ try:
     import essentia.standard as es
     import pyrubberband as pyrb
     from rich.console import Console
+    from rich.console import Console, Group
     from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.text import Text
     from pydub import AudioSegment
 
 except ImportError as e:
@@ -136,17 +141,21 @@ def stretch_audio(input_file: str, output_file: str, factor: float):
 
 
 def _process_single_file_task(args):
-    file_path, target_bpm, input_path_str, output_path_str, analyze_only, log_file_name = args
+    file_path, target_bpm, input_path_str, output_path_str, analyze_only, log_file_name, worker_id, status_dict = args
     
     input_path = Path(input_path_str)
     output_path = Path(output_path_str)
+    file_name = Path(file_path).name
 
     try:
+        status_dict[worker_id] = f"Detecting BPM for [bold]{file_name}[/bold]"
         detected_bpm = detect_bpm(file_path)
 
         if detected_bpm is None:
+            status_dict[worker_id] = "Idle"
             return (False, file_path, "BPM_DETECTION_FAILED")
         elif analyze_only:
+            status_dict[worker_id] = "Idle"
             return (True, file_path, "ANALYZE_ONLY", detected_bpm)
         elif detected_bpm > 0:
             factor = target_bpm / detected_bpm
@@ -155,17 +164,22 @@ def _process_single_file_task(args):
             output_file_path.parent.mkdir(parents=True, exist_ok=True)
 
             try:
+                status_dict[worker_id] = f"Stretching [bold]{file_name}[/bold]"
                 stretch_audio(file_path, str(output_file_path), factor)
+                status_dict[worker_id] = "Idle"
                 return (True, file_path, "PROCESSED")
             except Exception as e:
                 logging.error(f"Failed to stretch audio for {file_path}: {e}")
+                status_dict[worker_id] = "Idle"
                 return (False, file_path, "STRETCH_FAILED")
         else:
             logging.error(f"Cannot process {file_path} due to invalid detected BPM (0).")
+            status_dict[worker_id] = "Idle"
             return (False, file_path, "INVALID_BPM")
 
     except Exception as e:
         logging.error(f"Unhandled error processing {file_path}: {e}")
+        status_dict[worker_id] = "Idle"
         return (False, file_path, "UNHANDLED_ERROR")
 
 def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: bool):
@@ -186,7 +200,7 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
         console.print("[yellow]No audio files found. Exiting.[/yellow]")
         return
 
-    console.print(f"Found {len(audio_files)} audio files. Processing...")
+    console.print(f"Found {len(audio_files)} audio files.")
     
     if not analyze_only:
         output_path.mkdir(parents=True, exist_ok=True)
@@ -194,6 +208,7 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
     processed_count = 0
     modified_count = 0
     failed_count = 0
+    log_messages = []
 
     progress_columns = (
         TextColumn("[progress.description]{task.description}"),
@@ -202,55 +217,93 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
         TextColumn("eta"),
         TimeRemainingColumn(),
     )
+    progress = Progress(*progress_columns, console=console)
 
     num_cores = multiprocessing.cpu_count()
+    
+    with Manager() as manager:
+        status_dict = manager.dict()
+        for i in range(num_cores):
+            status_dict[i] = "Idle"
 
-    with Progress(*progress_columns, console=console) as progress:
-        task = progress.add_task("[green]Processing...", total=len(audio_files))
+        def get_status_panel() -> Panel:
+            status_group = Group(*[Text.from_markup(f"Worker {i+1}: {status_dict[i]}") for i in range(num_cores)])
+            return Panel(status_group, title="Worker Status", border_style="blue")
 
-        # Prepare arguments for each task
-        tasks_args = [
-            (file_path, target_bpm, str(input_path), str(output_path), analyze_only, LOG_FILE)
-            for file_path in audio_files
-        ]
+        job_panel = Panel(Group(*[Text.from_markup(msg) for msg in log_messages]), title="Results", border_style="green", expand=True)
+        layout = Group(progress, get_status_panel(), job_panel)
 
-        with multiprocessing.Pool(processes=num_cores) as pool:
-            for result in pool.imap_unordered(_process_single_file_task, tasks_args):
-                is_success, file_path, status_code, *extra_data = result
-                file_name = Path(file_path).name
+        with Live(layout, console=console, screen=False, redirect_stderr=False, vertical_overflow="visible") as live:
+            task = progress.add_task("[green]Process [/green]", total=len(audio_files))
 
-                if is_success:
-                    if status_code == "ANALYZE_ONLY":
-                        detected_bpm = extra_data[0]
-                        console.print(f"[blue] -> INFO [/blue] {file_name} | BPM: {detected_bpm:.2f}")
-                    elif status_code == "PROCESSED":
-                        modified_count += 1
-                        console.print(f"[green] -> OK   [/green] Processed {file_name}")
-                else:
-                    failed_count += 1
-                    if status_code == "BPM_DETECTION_FAILED":
-                        console.print(f"[red] -> FAIL [/red] Could not detect BPM for: {file_name}")
-                    elif status_code == "STRETCH_FAILED":
-                        console.print(f"[red] -> FAIL [/red] Could not process {file_name} (see {LOG_FILE})")
-                    elif status_code == "INVALID_BPM":
-                        console.print(f"[red] -> FAIL [/red] Invalid BPM (0) for {file_name}")
-                    elif status_code == "UNHANDLED_ERROR":
-                        console.print(f"[red] -> FAIL [/red] Unhandled error for {file_name} (see {LOG_FILE})")
-                
-                processed_count += 1
-                progress.update(task, advance=1, description=f"[green]Processing [bold]{file_name}[/bold]")
+            tasks_args = [
+                (file, target_bpm, str(input_path), str(output_path), analyze_only, LOG_FILE, i % num_cores, status_dict)
+                for i, file in enumerate(audio_files)
+            ]
+
+            # --- Threaded updater for the live display ---
+            stop_event = threading.Event()
+            def updater():
+                while not stop_event.is_set():
+                    live.update(Group(progress, get_status_panel(), job_panel))
+                    time.sleep(0.1)
+            
+            updater_thread = threading.Thread(target=updater)
+            updater_thread.start()
+            # -----------------------------------------
+
+            with multiprocessing.Pool(processes=num_cores) as pool:
+                for result in pool.imap_unordered(_process_single_file_task, tasks_args):
+                    is_success, file_path, status_code, *extra_data = result
+                    file_name = Path(file_path).name
+
+                    if is_success:
+                        if status_code == "ANALYZE_ONLY":
+                            detected_bpm = extra_data[0]
+                            log_messages.append(f"[blue] INFO [/blue] {file_name} | BPM: {detected_bpm:.2f}")
+                        elif status_code == "PROCESSED":
+                            modified_count += 1
+                            log_messages.append(f"[green] OK   [/green] Processed {file_name}")
+                    else:
+                        failed_count += 1
+                        if status_code == "BPM_DETECTION_FAILED":
+                            log_messages.append(f"[red]  FAIL [/red] Could not detect BPM for: {file_name}")
+                        elif status_code == "STRETCH_FAILED":
+                            log_messages.append(f"[red]  FAIL [/red] Could not process {file_name} (see {LOG_FILE})")
+                        elif status_code == "INVALID_BPM":
+                            log_messages.append(f"[red]  FAIL [/red] Invalid BPM (0) for {file_name}")
+                        elif status_code == "UNHANDLED_ERROR":
+                            log_messages.append(f"[red]  FAIL [/red] Unhandled error for {file_name} (see {LOG_FILE})")
+                    
+                    processed_count += 1
+                    progress.update(task, advance=1)
+                    job_panel.renderable = Group(*[Text.from_markup(msg) for msg in log_messages])
+            
+            # Stop the updater thread
+            stop_event.set()
+            updater_thread.join()
+
+            # Final cleanup of the status panel
+            for i in range(num_cores):
+                status_dict[i] = "Idle"
+            live.update(Group(progress, get_status_panel(), job_panel))
 
     # --- Final Summary ---
-    console.print("\n" + "="*30)
-    console.print("[bold green]Processing Complete[/bold green]")
-    console.print("="*30)
-    console.print(f"Total files processed: {processed_count}")
+    summary_messages = []
+    summary_messages.append(f"Total files processed: {processed_count}")
     if not analyze_only:
-        console.print(f"Files modified:        {modified_count}")
-    console.print(f"Files failed:          [red]{failed_count}[/red]")
+        summary_messages.append(f"Files modified:        {modified_count}")
+    summary_messages.append(f"Files failed:          [red]{failed_count}[/red]")
     if failed_count > 0:
-        console.print(f"See '{LOG_FILE}' for details on errors.")
-    console.print("="*30)
+        summary_messages.append(f"See '{LOG_FILE}' for details on errors.")
+
+    summary_panel = Panel(
+        Group(*[Text.from_markup(msg) for msg in summary_messages]),
+        title="[bold green]Processing Complete[/bold green]",
+        border_style="green",
+        expand=False
+    )
+    console.print(summary_panel)
 
 
 def main():
