@@ -46,6 +46,8 @@ from pathlib import Path
 import multiprocessing
 
 try:
+    import essentia
+    essentia.log.infoActive = False
     import essentia.standard as es
     import pyrubberband as pyrb
     from rich.console import Console
@@ -202,7 +204,6 @@ def process_folder(folder: str, target_bpm: float, out_dir: str, analyze_only: b
     )
 
     num_cores = multiprocessing.cpu_count()
-    console.print(f"Using {num_cores} CPU cores for parallel processing.")
 
     with Progress(*progress_columns, console=console) as progress:
         task = progress.add_task("[green]Processing...", total=len(audio_files))
