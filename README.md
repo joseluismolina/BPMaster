@@ -78,3 +78,7 @@ To scan all audio files in `~/Music/samples` and see their detected BPM without 
 ```bash
 python bpm_master.py ~/Music/samples --target-bpm 120 --analyze-only
 ```
+
+## License
+
+This project is licensed under the GNU General Public License v3.0 - see the [LICENSE](LICENSE) file for details.
